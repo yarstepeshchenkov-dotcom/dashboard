@@ -55,4 +55,11 @@ def collect_vk_rss():
         except Exception as e:
             logger.warning(f"Ошибка RSS для {group}: {e}")
     logger.info(f"✅ VK: {len(mentions)} записей")
+    return mentions                        "is_b2b": 0,
+                        "created_at": created_at,
+                        "viewed": 0
+                    })
+        except Exception as e:
+            logger.warning(f"Ошибка RSS для {group}: {e}")
+    logger.info(f"✅ VK: {len(mentions)} записей")
     return mentions
