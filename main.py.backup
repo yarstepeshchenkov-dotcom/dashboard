@@ -1,0 +1,498 @@
+"""
+LITHIUM Intelligence Dashboard
+==============================
+Веб-дашборд маркетинговой разведки для бренда LITHIUM.
+Заменяет Telegram-бота, используя ту же SQLite-базу.
+
+Ожидаемая схема БД (если у вас другие названия таблиц/колонок —
+поправьте SQL-запросы в блоке "ЗАПРОСЫ К БД" ниже, это единственное
+место, которое их использует):
+
+    mentions (
+        id INTEGER PRIMARY KEY,
+        source TEXT,            -- откуда упоминание (площадка, канал и т.д.)
+        text TEXT,               -- текст упоминания
+        sentiment TEXT,          -- 'positive' | 'negative' | 'neutral'
+        is_b2b INTEGER,          -- 0/1
+        created_at TEXT,         -- ISO-дата
+        viewed INTEGER           -- 0/1, опционально
+    )
+
+    ads (
+        id INTEGER PRIMARY KEY,
+        competitor TEXT,
+        title TEXT,
+        platform TEXT,
+        url TEXT,
+        created_at TEXT
+    )
+
+    geo_positions (
+        id INTEGER PRIMARY KEY,
+        city TEXT,
+        brand TEXT,
+        position INTEGER,        -- NULL если позиция неизвестна
+        updated_at TEXT
+    )
+
+    trends (
+        id INTEGER PRIMARY KEY,
+        keyword TEXT,
+        mentions_count INTEGER,
+        growth_percent REAL,
+        updated_at TEXT
+    )
+
+Если какой-то таблицы нет в реальной БД — соответствующий эндпоинт
+вернёт пустой список / мок-данные с пометкой "mock": true, приложение
+при этом не упадёт.
+"""
+
+import os
+import sqlite3
+import smtplib
+import secrets
+import asyncio
+import logging
+from email.mime.text import MIMEText
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Form, Depends, Query
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.middleware.sessions import SessionMiddleware
+
+# --------------------------------------------------------------------------
+# КОНФИГУРАЦИЯ
+# --------------------------------------------------------------------------
+
+load_dotenv()
+
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
+SECRET_KEY = os.getenv("SECRET_KEY", "insecure-dev-key-change-me")
+
+DB_PATH = os.getenv("DB_PATH", "/root/lithium_bot/data/lithium.db")
+SITE_URL = os.getenv("SITE_URL", "https://lithiumhome.ru")
+
+EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
+EMAIL_FROM = os.getenv("EMAIL_FROM", "")
+EMAIL_TO = os.getenv("EMAIL_TO", "")
+SMTP_SERVER = os.getenv("SMTP_SERVER", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+
+NEGATIVE_ALERT_THRESHOLD = int(os.getenv("NEGATIVE_ALERT_THRESHOLD", "5"))
+ALERT_WINDOW_MINUTES = int(os.getenv("ALERT_WINDOW_MINUTES", "60"))
+BACKGROUND_CHECK_INTERVAL_SECONDS = int(os.getenv("BACKGROUND_CHECK_INTERVAL_SECONDS", "300"))
+
+CITIES = ["Москва", "Санкт-Петербург", "Екатеринбург", "Казань", "Новосибирск"]
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("lithium_dashboard")
+
+# --------------------------------------------------------------------------
+# ПРИЛОЖЕНИЕ
+# --------------------------------------------------------------------------
+
+app = FastAPI(title="LITHIUM Intelligence Dashboard")
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, session_cookie="lithium_session")
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+# В памяти храним время последнего критического email-алерта, чтобы не спамить.
+_last_alert_sent_at: dict[str, datetime] = {}
+
+
+# --------------------------------------------------------------------------
+# РАБОТА С БД
+# --------------------------------------------------------------------------
+
+@contextmanager
+def get_db():
+    """Открыть соединение с существующей БД бота (только чтение)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    try:
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
+        return column in cols
+    except sqlite3.Error:
+        return False
+
+
+def safe_db_call(default):
+    """Декоратор: если БД/таблица недоступна — вернуть значение по умолчанию, не роняя приложение."""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except sqlite3.Error as e:
+                logger.warning(f"DB error in {fn.__name__}: {e}")
+                return default
+        return wrapper
+    return decorator
+
+
+# ---- ЗАПРОСЫ К БД ---------------------------------------------------------
+
+@safe_db_call({"total": 0, "positive": 0, "negative": 0, "neutral": 0, "ads_count": 0, "mock": True})
+def get_stats() -> dict:
+    with get_db() as conn:
+        if not table_exists(conn, "mentions"):
+            return {"total": 0, "positive": 0, "negative": 0, "neutral": 0, "ads_count": 0, "mock": True}
+
+        total = conn.execute("SELECT COUNT(*) c FROM mentions").fetchone()["c"]
+        positive = conn.execute(
+            "SELECT COUNT(*) c FROM mentions WHERE sentiment='positive'"
+        ).fetchone()["c"]
+        negative = conn.execute(
+            "SELECT COUNT(*) c FROM mentions WHERE sentiment='negative'"
+        ).fetchone()["c"]
+        neutral = max(total - positive - negative, 0)
+
+        ads_count = 0
+        if table_exists(conn, "ads"):
+            ads_count = conn.execute("SELECT COUNT(*) c FROM ads").fetchone()["c"]
+
+        return {
+            "total": total,
+            "positive": positive,
+            "negative": negative,
+            "neutral": neutral,
+            "ads_count": ads_count,
+            "mock": False,
+        }
+
+
+@safe_db_call([])
+def get_mentions(sentiment: str | None = None, limit: int = 200) -> list[dict]:
+    with get_db() as conn:
+        if not table_exists(conn, "mentions"):
+            return []
+
+        has_viewed = column_exists(conn, "mentions", "viewed")
+        select_cols = "id, source, text, sentiment, is_b2b, created_at" + (
+            ", viewed" if has_viewed else ", 0 as viewed"
+        )
+
+        query = f"SELECT {select_cols} FROM mentions"
+        params: list = []
+        if sentiment and sentiment != "all":
+            query += " WHERE sentiment = ?"
+            params.append(sentiment)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        rows = conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+
+@safe_db_call([])
+def get_ads(limit: int = 200) -> list[dict]:
+    with get_db() as conn:
+        if not table_exists(conn, "ads"):
+            return []
+        rows = conn.execute(
+            "SELECT id, competitor, title, platform, url, created_at "
+            "FROM ads ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+@safe_db_call({"cities": CITIES, "rows": [], "mock": True})
+def get_geo() -> dict:
+    with get_db() as conn:
+        if not table_exists(conn, "geo_positions"):
+            return {"cities": CITIES, "rows": [], "mock": True}
+
+        rows = conn.execute(
+            "SELECT city, brand, position FROM geo_positions"
+        ).fetchall()
+
+        # Группируем по бренду: { brand: { city: position } }
+        by_brand: dict[str, dict[str, int | None]] = {}
+        for r in rows:
+            by_brand.setdefault(r["brand"], {})[r["city"]] = r["position"]
+
+        table = [
+            {"brand": brand, "positions": {c: positions.get(c) for c in CITIES}}
+            for brand, positions in by_brand.items()
+        ]
+        return {"cities": CITIES, "rows": table, "mock": False}
+
+
+@safe_db_call([])
+def get_trends(limit: int = 5) -> list[dict]:
+    with get_db() as conn:
+        if not table_exists(conn, "trends"):
+            return []
+        rows = conn.execute(
+            "SELECT keyword, mentions_count, growth_percent "
+            "FROM trends ORDER BY growth_percent DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def mark_mention_viewed(mention_id: int) -> bool:
+    try:
+        with get_db() as conn:
+            if not table_exists(conn, "mentions") or not column_exists(conn, "mentions", "viewed"):
+                return False
+            conn.execute("UPDATE mentions SET viewed = 1 WHERE id = ?", (mention_id,))
+            conn.commit()
+            return True
+    except sqlite3.Error as e:
+        logger.warning(f"Failed to mark mention viewed: {e}")
+        return False
+
+
+def count_recent_negative(minutes: int) -> int:
+    try:
+        with get_db() as conn:
+            if not table_exists(conn, "mentions"):
+                return 0
+            # Наивная метка времени без таймзоны — большинство ботов пишут created_at
+            # через datetime.now()/utcnow() без tzinfo. Если у вас в БД хранится
+            # ISO-формат с таймзоной (+00:00), поправьте сравнение здесь.
+            since = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=minutes)).isoformat()
+            row = conn.execute(
+                "SELECT COUNT(*) c FROM mentions WHERE sentiment='negative' AND created_at >= ?",
+                (since,),
+            ).fetchone()
+            return row["c"] if row else 0
+    except sqlite3.Error:
+        return 0
+
+
+# --------------------------------------------------------------------------
+# АВТОРИЗАЦИЯ
+# --------------------------------------------------------------------------
+
+def is_authenticated(request: Request) -> bool:
+    return bool(request.session.get("authenticated"))
+
+
+def require_auth(request: Request):
+    """Dependency: возвращает True, либо кидает редирект через исключение в роуте."""
+    return is_authenticated(request)
+
+
+def get_or_create_csrf(request: Request) -> str:
+    token = request.session.get("csrf_token")
+    if not token:
+        token = secrets.token_hex(16)
+        request.session["csrf_token"] = token
+    return token
+
+
+# --------------------------------------------------------------------------
+# ПРОВЕРКА САЙТА
+# --------------------------------------------------------------------------
+
+async def check_site_status() -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            resp = await client.get(SITE_URL)
+            return {"up": resp.status_code < 500, "status_code": resp.status_code}
+    except httpx.RequestError as e:
+        logger.warning(f"Site status check failed: {e}")
+        return {"up": False, "status_code": None}
+
+
+# --------------------------------------------------------------------------
+# EMAIL-УВЕДОМЛЕНИЯ
+# --------------------------------------------------------------------------
+
+def send_email_alert(subject: str, body: str) -> None:
+    if not EMAIL_ENABLED:
+        return
+    if not (SMTP_SERVER and SMTP_USER and SMTP_PASS and EMAIL_TO):
+        logger.warning("EMAIL_ENABLED=true, но SMTP-настройки заполнены не полностью — письмо не отправлено.")
+        return
+    try:
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_FROM or SMTP_USER
+        msg["To"] = EMAIL_TO
+        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10) as server:
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(msg["From"], [EMAIL_TO], msg.as_string())
+        logger.info(f"Email alert sent: {subject}")
+    except Exception as e:
+        logger.error(f"Failed to send email alert: {e}")
+
+
+def _should_send_alert(key: str, cooldown_minutes: int = 60) -> bool:
+    last = _last_alert_sent_at.get(key)
+    if last and datetime.now(timezone.utc) - last < timedelta(minutes=cooldown_minutes):
+        return False
+    _last_alert_sent_at[key] = datetime.now(timezone.utc)
+    return True
+
+
+async def background_monitor():
+    """Фоновая проверка критических событий: падение сайта, всплеск негатива."""
+    while True:
+        try:
+            status = await check_site_status()
+            if not status["up"] and _should_send_alert("site_down"):
+                send_email_alert(
+                    "🔴 LITHIUM: сайт недоступен",
+                    f"lithiumhome.ru не отвечает (код: {status['status_code']}). "
+                    f"Время проверки (UTC): {datetime.now(timezone.utc).isoformat()}",
+                )
+
+            negative_count = count_recent_negative(ALERT_WINDOW_MINUTES)
+            if negative_count >= NEGATIVE_ALERT_THRESHOLD and _should_send_alert("negative_spike"):
+                send_email_alert(
+                    "🔴 LITHIUM: всплеск негативных упоминаний",
+                    f"За последние {ALERT_WINDOW_MINUTES} мин. зафиксировано {negative_count} "
+                    f"негативных упоминаний (порог: {NEGATIVE_ALERT_THRESHOLD}).",
+                )
+        except Exception as e:
+            logger.error(f"background_monitor error: {e}")
+
+        await asyncio.sleep(BACKGROUND_CHECK_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(background_monitor())
+
+
+# --------------------------------------------------------------------------
+# СТРАНИЦЫ
+# --------------------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if is_authenticated(request):
+        return RedirectResponse(url="/dashboard", status_code=303)
+    csrf_token = get_or_create_csrf(request)
+    return templates.TemplateResponse(
+        "login.html", {"request": request, "csrf_token": csrf_token, "error": None}
+    )
+
+
+@app.post("/login")
+async def login(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    csrf_token: str = Form(...),
+):
+    session_csrf = request.session.get("csrf_token")
+    if not session_csrf or csrf_token != session_csrf:
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "csrf_token": get_or_create_csrf(request), "error": "Сессия устарела, попробуйте ещё раз."},
+            status_code=400,
+        )
+
+    if secrets.compare_digest(username, ADMIN_USERNAME) and secrets.compare_digest(password, ADMIN_PASSWORD):
+        request.session["authenticated"] = True
+        request.session.pop("csrf_token", None)
+        return RedirectResponse(url="/dashboard", status_code=303)
+
+    return templates.TemplateResponse(
+        "login.html",
+        {"request": request, "csrf_token": get_or_create_csrf(request), "error": "Неверный логин или пароль."},
+        status_code=401,
+    )
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse(
+        "dashboard.html", {"request": request, "site_url": SITE_URL}
+    )
+
+
+# --------------------------------------------------------------------------
+# API
+# --------------------------------------------------------------------------
+
+def _guard(request: Request):
+    """Возвращает JSONResponse 401, если не авторизован, иначе None."""
+    if not is_authenticated(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    return None
+
+
+@app.get("/api/stats")
+async def api_stats(request: Request):
+    if (guard := _guard(request)):
+        return guard
+    return get_stats()
+
+
+@app.get("/api/mentions")
+async def api_mentions(request: Request, sentiment: str = Query(default="all"), limit: int = Query(default=200, le=1000)):
+    if (guard := _guard(request)):
+        return guard
+    return {"items": get_mentions(sentiment=sentiment, limit=limit)}
+
+
+@app.post("/api/mentions/{mention_id}/viewed")
+async def api_mark_viewed(request: Request, mention_id: int):
+    if (guard := _guard(request)):
+        return guard
+    ok = mark_mention_viewed(mention_id)
+    return {"ok": ok}
+
+
+@app.get("/api/ads")
+async def api_ads(request: Request, limit: int = Query(default=200, le=1000)):
+    if (guard := _guard(request)):
+        return guard
+    return {"items": get_ads(limit=limit)}
+
+
+@app.get("/api/geo")
+async def api_geo(request: Request):
+    if (guard := _guard(request)):
+        return guard
+    return get_geo()
+
+
+@app.get("/api/trends")
+async def api_trends(request: Request, limit: int = Query(default=5, le=50)):
+    if (guard := _guard(request)):
+        return guard
+    return {"items": get_trends(limit=limit)}
+
+
+@app.get("/api/site-status")
+async def api_site_status(request: Request):
+    if (guard := _guard(request)):
+        return guard
+    return await check_site_status()

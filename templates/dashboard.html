@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LITHIUM Intelligence Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cormorant+Garamond:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js"></script>
+</head>
+<body>
+
+<div id="notif-stack" class="notif-stack" aria-live="polite"></div>
+
+<header class="topbar">
+    <div class="topbar-left">
+        <span class="brand-mark">L</span>
+        <span class="brand-name">LITHIUM <em>Intelligence</em></span>
+    </div>
+    <div class="topbar-right">
+        <div class="site-status" id="site-status">
+            <span class="status-dot status-dot--pending" id="status-dot"></span>
+            <span id="status-label">Проверка сайта…</span>
+        </div>
+        <a href="/logout" class="btn-ghost">Выйти</a>
+    </div>
+</header>
+
+<nav class="tabs">
+    <button class="tab active" data-tab="overview">Дашборд</button>
+    <button class="tab" data-tab="mentions">Упоминания</button>
+    <button class="tab" data-tab="ads">Реклама конкурентов</button>
+    <button class="tab" data-tab="geo">Гео-анализ</button>
+</nav>
+
+<main class="content">
+
+    <!-- ================= ОБЗОР ================= -->
+    <section id="tab-overview" class="tab-panel active">
+        <div class="cards-row">
+            <div class="stat-card">
+                <span class="stat-label">Всего упоминаний</span>
+                <span class="stat-value" id="stat-total">—</span>
+            </div>
+            <div class="stat-card stat-card--positive">
+                <span class="stat-label">Позитивные</span>
+                <span class="stat-value" id="stat-positive">—</span>
+            </div>
+            <div class="stat-card stat-card--negative">
+                <span class="stat-label">Негативные</span>
+                <span class="stat-value" id="stat-negative">—</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Реклама конкурентов</span>
+                <span class="stat-value" id="stat-ads">—</span>
+            </div>
+        </div>
+
+        <div class="panels-row">
+            <div class="panel panel--chart">
+                <h2>Тренды запросов</h2>
+                <canvas id="trends-chart" height="220"></canvas>
+                <p class="panel-empty" id="trends-chart-empty" hidden>Нет данных по трендам</p>
+            </div>
+            <div class="panel panel--list">
+                <h2>Топ-5 трендов</h2>
+                <ol class="trend-list" id="trend-list">
+                    <li class="muted">Загрузка…</li>
+                </ol>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= УПОМИНАНИЯ ================= -->
+    <section id="tab-mentions" class="tab-panel">
+        <div class="panel-header">
+            <h2>Упоминания бренда</h2>
+            <div class="filter-tabs" id="sentiment-filter">
+                <button class="filter-tab active" data-sentiment="all">Все</button>
+                <button class="filter-tab" data-sentiment="positive">Позитивные</button>
+                <button class="filter-tab" data-sentiment="negative">Негативные</button>
+                <button class="filter-tab" data-sentiment="neutral">Нейтральные</button>
+            </div>
+        </div>
+        <div class="table-wrap">
+            <table class="data-table" id="mentions-table">
+                <thead>
+                    <tr>
+                        <th>Источник</th>
+                        <th>Текст</th>
+                        <th>Тональность</th>
+                        <th>B2B</th>
+                        <th>Дата</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="mentions-tbody">
+                    <tr><td colspan="6" class="muted">Загрузка…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- ================= РЕКЛАМА КОНКУРЕНТОВ ================= -->
+    <section id="tab-ads" class="tab-panel">
+        <div class="panel-header">
+            <h2>Реклама конкурентов</h2>
+        </div>
+        <div class="table-wrap">
+            <table class="data-table" id="ads-table">
+                <thead>
+                    <tr>
+                        <th>Конкурент</th>
+                        <th>Заголовок</th>
+                        <th>Платформа</th>
+                        <th>Дата</th>
+                    </tr>
+                </thead>
+                <tbody id="ads-tbody">
+                    <tr><td colspan="4" class="muted">Загрузка…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- ================= ГЕО-АНАЛИЗ ================= -->
+    <section id="tab-geo" class="tab-panel">
+        <div class="panel-header">
+            <h2>Позиции по городам</h2>
+        </div>
+        <div class="table-wrap">
+            <table class="data-table" id="geo-table">
+                <thead id="geo-thead">
+                    <tr><th>Бренд</th></tr>
+                </thead>
+                <tbody id="geo-tbody">
+                    <tr><td class="muted">Загрузка…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+</main>
+
+<script src="/static/script.js"></script>
+</body>
+</html>

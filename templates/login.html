@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LITHIUM Intelligence — Вход</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cormorant+Garamond:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+    <div class="login-wrap">
+        <div class="login-card">
+            <div class="login-brand">
+                <span class="login-brand-mark">L</span>
+                <div class="login-brand-text">
+                    <h1>LITHIUM</h1>
+                    <p>Intelligence Dashboard</p>
+                </div>
+            </div>
+
+            {% if error %}
+            <div class="login-error">{{ error }}</div>
+            {% endif %}
+
+            <form method="post" action="/login" class="login-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+                <label class="field">
+                    <span class="field-label">Логин</span>
+                    <input type="text" name="username" autocomplete="username" required autofocus>
+                </label>
+
+                <label class="field">
+                    <span class="field-label">Пароль</span>
+                    <input type="password" name="password" autocomplete="current-password" required>
+                </label>
+
+                <button type="submit" class="btn-gold">Войти</button>
+            </form>
+
+            <p class="login-footnote">Доступ только для авторизованных сотрудников LITHIUM</p>
+        </div>
+    </div>
+</body>
+</html>
