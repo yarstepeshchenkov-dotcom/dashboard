@@ -23,10 +23,8 @@ def collect_news():
 
         if title is not None and description is not None:
             text = f"{title.text}. {description.text}"[:500]
-            # Парсим дату
             try:
                 if pub_date is not None and pub_date.text:
-                    # Пример: Wed, 01 Jul 2026 09:00:00 +0300
                     dt = datetime.strptime(pub_date.text[:25], "%a, %d %b %Y %H:%M:%S")
                     created_at = dt.isoformat()
                 else:
