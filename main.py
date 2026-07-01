@@ -1,5 +1,5 @@
 import os
-import sqlite3
+import logging
 from datetime import datetime
 from fastapi import FastAPI, Request, Form, Query
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
@@ -8,7 +8,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 import secrets
-import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
@@ -17,7 +18,10 @@ load_dotenv()
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
 SECRET_KEY = os.getenv("SECRET_KEY", "insecure-dev-key-change-me")
-DB_PATH = os.getenv("DB_PATH", "/tmp/lithium.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError("❌ DATABASE_URL не задан! Укажите PostgreSQL URL.")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("lithium_dashboard")
@@ -29,58 +33,74 @@ app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, session_cookie="lit
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# ─── ИНИЦИАЛИЗАЦИЯ БД С ТЕСТОВЫМИ ДАННЫМИ ──────────────────────────────
+# ─── РАБОТА С БД ──────────────────────────────────────────────────────────
+
+def get_db_connection():
+    """Возвращает соединение с PostgreSQL."""
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
+    """Создаёт таблицы и заполняет тестовыми данными, если они пустые."""
     try:
-        db_dir = os.path.dirname(DB_PATH)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS mentions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source TEXT,
-            text TEXT,
-            sentiment TEXT,
-            is_b2b INTEGER DEFAULT 0,
-            created_at TEXT,
-            viewed INTEGER DEFAULT 0
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS geo_positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT,
-            brand TEXT,
-            position INTEGER,
-            updated_at TEXT
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS trends (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            keyword TEXT,
-            mentions_count INTEGER,
-            growth_percent REAL,
-            updated_at TEXT
-        )''')
-        # Проверяем, есть ли данные
-        c.execute("SELECT COUNT(*) FROM mentions")
-        count = c.fetchone()[0]
-        logger.info(f"Текущее количество записей в mentions: {count}")
-        if count == 0:
-            now = datetime.now().isoformat()
-            test_data = [
-                ("Тестовый", "Отличная кухня LITHIUM! Заказывали в шоуруме на Artplay — очень довольны качеством.", "positive", now),
-                ("Тестовый", "Кухня LITHIUM — это идеальное решение для современного дома. Рекомендую!", "positive", now),
-                ("Тестовый", "Разочарован доставкой LITHIUM: задержали на неделю, пришлось переносить ремонт.", "negative", now),
-                ("Тестовый", "Кухня LITHIUM: качество на высоте, дизайн превосходный!", "positive", now),
-                ("Тестовый", "Обсуждаем на форуме кухни LITHIUM. Кто-то уже заказывал? Поделитесь опытом.", "neutral", now)
-            ]
-            for item in test_data:
-                c.execute("INSERT INTO mentions (source, text, sentiment, created_at) VALUES (?,?,?,?)", item)
-            conn.commit()
-            logger.info("✅ Тестовые данные добавлены в БД")
-        else:
-            logger.info("ℹ️ Таблица mentions уже содержит данные, тестовые не добавлены")
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Таблица mentions
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS mentions (
+                        id SERIAL PRIMARY KEY,
+                        source TEXT,
+                        text TEXT,
+                        sentiment TEXT,
+                        is_b2b INTEGER DEFAULT 0,
+                        created_at TEXT,
+                        viewed INTEGER DEFAULT 0
+                    )
+                """)
+                # Таблица geo_positions
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS geo_positions (
+                        id SERIAL PRIMARY KEY,
+                        city TEXT,
+                        brand TEXT,
+                        position INTEGER,
+                        updated_at TEXT
+                    )
+                """)
+                # Таблица trends
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS trends (
+                        id SERIAL PRIMARY KEY,
+                        keyword TEXT,
+                        mentions_count INTEGER,
+                        growth_percent REAL,
+                        updated_at TEXT
+                    )
+                """)
+                conn.commit()
+
+                # Проверяем, есть ли данные в mentions
+                cur.execute("SELECT COUNT(*) FROM mentions")
+                count = cur.fetchone()[0]
+                logger.info(f"Текущее количество записей в mentions: {count}")
+
+                if count == 0:
+                    now = datetime.now().isoformat()
+                    test_data = [
+                        ("Тестовый", "Отличная кухня LITHIUM! Заказывали в шоуруме на Artplay — очень довольны качеством.", "positive", now),
+                        ("Тестовый", "Кухня LITHIUM — это идеальное решение для современного дома. Рекомендую!", "positive", now),
+                        ("Тестовый", "Разочарован доставкой LITHIUM: задержали на неделю, пришлось переносить ремонт.", "negative", now),
+                        ("Тестовый", "Кухня LITHIUM: качество на высоте, дизайн превосходный!", "positive", now),
+                        ("Тестовый", "Обсуждаем на форуме кухни LITHIUM. Кто-то уже заказывал? Поделитесь опытом.", "neutral", now)
+                    ]
+                    for item in test_data:
+                        cur.execute(
+                            "INSERT INTO mentions (source, text, sentiment, created_at) VALUES (%s, %s, %s, %s)",
+                            item
+                        )
+                    conn.commit()
+                    logger.info("✅ Тестовые данные добавлены в БД")
+                else:
+                    logger.info("ℹ️ Таблица mentions уже содержит данные, тестовые не добавлены")
     except Exception as e:
         logger.error(f"❌ Ошибка при инициализации БД: {e}")
 
@@ -129,34 +149,36 @@ async def dashboard(request: Request):
 # ─── API ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
-async def api_stats(request: Request):
+async def api_stats():
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        total = c.execute("SELECT COUNT(*) FROM mentions").fetchone()[0]
-        positive = c.execute("SELECT COUNT(*) FROM mentions WHERE sentiment='positive'").fetchone()[0]
-        negative = c.execute("SELECT COUNT(*) FROM mentions WHERE sentiment='negative'").fetchone()[0]
-        neutral = max(total - positive - negative, 0)
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                total = cur.execute("SELECT COUNT(*) FROM mentions").fetchone()[0]
+                positive = cur.execute("SELECT COUNT(*) FROM mentions WHERE sentiment='positive'").fetchone()[0]
+                negative = cur.execute("SELECT COUNT(*) FROM mentions WHERE sentiment='negative'").fetchone()[0]
+                neutral = max(total - positive - negative, 0)
         return {"total": total, "positive": positive, "negative": negative, "neutral": neutral, "ads_count": 0}
     except Exception as e:
         logger.error(f"Ошибка в /api/stats: {e}")
         return {"total": 0, "positive": 0, "negative": 0, "neutral": 0, "ads_count": 0}
 
 @app.get("/api/mentions")
-async def api_mentions(request: Request, sentiment: str = Query(default="all"), limit: int = Query(default=200)):
+async def api_mentions(sentiment: str = Query(default="all"), limit: int = Query(default=200)):
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        if sentiment != "all":
-            c.execute("SELECT id, source, text, sentiment, is_b2b, created_at, viewed FROM mentions WHERE sentiment=? ORDER BY created_at DESC LIMIT ?", (sentiment, limit))
-        else:
-            c.execute("SELECT id, source, text, sentiment, is_b2b, created_at, viewed FROM mentions ORDER BY created_at DESC LIMIT ?", (limit,))
-        rows = c.fetchall()
-        conn.close()
-        items = [dict(row) for row in rows]
-        return {"items": items}
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if sentiment != "all":
+                    cur.execute(
+                        "SELECT id, source, text, sentiment, is_b2b, created_at, viewed FROM mentions WHERE sentiment=%s ORDER BY created_at DESC LIMIT %s",
+                        (sentiment, limit)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT id, source, text, sentiment, is_b2b, created_at, viewed FROM mentions ORDER BY created_at DESC LIMIT %s",
+                        (limit,)
+                    )
+                rows = cur.fetchall()
+        return {"items": [dict(row) for row in rows]}
     except Exception as e:
         logger.error(f"Ошибка в /api/mentions: {e}")
         return {"items": []}
