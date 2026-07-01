@@ -430,6 +430,7 @@ from services.news_collector import collect_news
 from services.vk_collector import collect_vk_rss
 from services.forum_collector import collect_forum
 
+@app.get("/api/collect")
 @app.post("/api/collect")
 async def collect_data(token: str = Query(...)):
     if token != os.getenv("COLLECT_TOKEN", ""):
