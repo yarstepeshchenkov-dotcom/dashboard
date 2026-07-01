@@ -423,7 +423,7 @@ async def on_startup():
     logger.info(f"🚀 Сервер запущен, БД: {DB_PATH}")
 
 # --------------------------------------------------------------------------
-# СБОР ДАННЫХ ИЗ РЕАЛЬНЫХ ИСТОЧНИКОВ
+# СБОР ДАННЫХ ИЗ РЕАЛЬНЫХ ИСТОЧНИКОВ (с отладочным логированием)
 # --------------------------------------------------------------------------
 
 from services.news_collector import collect_news
@@ -436,14 +436,39 @@ async def collect_data(token: str = Query(...)):
     if token != os.getenv("COLLECT_TOKEN", ""):
         return JSONResponse({"error": "invalid token"}, status_code=403)
 
+    logger.info("🔍 Начинаем сбор данных...")
     all_mentions = []
-    all_mentions.extend(collect_news())
-    all_mentions.extend(collect_vk_rss())
-    all_mentions.extend(collect_forum())
+
+    # 1. Яндекс.Новости
+    try:
+        news = collect_news()
+        logger.info(f"✅ Яндекс.Новости: {len(news)} записей")
+        all_mentions.extend(news)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в collect_news: {e}")
+
+    # 2. VK
+    try:
+        vk = collect_vk_rss()
+        logger.info(f"✅ VK: {len(vk)} записей")
+        all_mentions.extend(vk)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в collect_vk_rss: {e}")
+
+    # 3. ForumHouse
+    try:
+        forum = collect_forum()
+        logger.info(f"✅ ForumHouse: {len(forum)} записей")
+        all_mentions.extend(forum)
+    except Exception as e:
+        logger.error(f"❌ Ошибка в collect_forum: {e}")
+
+    logger.info(f"📊 Всего собрано: {len(all_mentions)} записей")
 
     if not all_mentions:
         return {"status": "ok", "message": "Новых данных не найдено"}
 
+    # Сохраняем в БД
     with get_db() as conn:
         c = conn.cursor()
         saved = 0
